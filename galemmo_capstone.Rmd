@@ -1,0 +1,197 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is my attempt to identify a leaing cause of fatigue in players of the Canadian Women's Rugby Sevens team during the 2017-2018 Rugby World Series. The data was provided by the Canadian national team and some aspects of the code were borrowed from internet tutorials that are cited below.
+
+Below is the intial import and cleaning of the data.
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(xlsx)
+library(ISLR)
+library(leaps)
+library(tidyverse)
+library(cowplot)
+library(corrplot)
+library(tree)
+library(rattle)
+library(rpart.plot)
+library(caret)
+library(e1071)
+
+setwd("C:/Users/Owner/Desktop/UCLA INTENSIVE/Capstone2/data")
+
+games = read.csv("games.csv")
+commonwealth = read.csv("CommonWealth.csv")
+monitored_per_game = read.csv("MonitoredPerGame.csv")
+rpe = read.csv("rpe.csv")
+wellness = read.csv("wellness.csv")
+who_played_what = read.csv("whoPlayedWhat.csv")
+
+colnames(games)[colnames(games) == "ï..GameID"] <- "GameID"
+who_played_what = who_played_what[,2:19]
+games = left_join(games, who_played_what)
+colnames(monitored_per_game)[colnames(monitored_per_game) == "ï..GameID"] <- "GameID"
+monitored_per_game = monitored_per_game[,1:2]
+
+games$Date = mdy(games$Date)
+wellness$Date = ymd(wellness$Date)
+rpe$Date = ymd(rpe$Date)
+
+wellness$BedTime <- as.character(wellness$BedTime) %>%
+  hms::as.hms(wellness$BedTime)
+wellness$WakeTime <- as.character(wellness$WakeTime) %>%
+  hms::as.hms(wellness$WakeTime)
+
+for(i in 11:27) {
+  games[,i] = as.factor(games[,i])
+}
+
+str(games)
+str(wellness)
+str(rpe)
+
+summary(games)
+summary(wellness)
+summary(rpe)
+
+
+##Visualize missing data
+missing_data <- rpe %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data <- gather(missing_data, key = "variables", value = "percent_missing")
+ggplot(missing_data, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+
+rpe1 = rpe[,c("Date","PlayerID","Training","SessionType","Duration","RPE","SessionLoad")]
+acr = rpe[,c("Date","PlayerID","AcuteLoad","ChronicLoad","AcuteChronicRatio")]
+acr = acr[complete.cases(acr),]
+
+missing_data <- rpe1 %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data <- gather(missing_data, key = "variables", value = "percent_missing")
+ggplot(missing_data, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+
+missing_data <- wellness %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data <- gather(missing_data, key = "variables", value = "percent_missing")
+ggplot(missing_data, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+
+wellness1 = wellness[-c(17:18)]
+wellness1$TrainingReadiness <- as.character(wellness1$TrainingReadiness)
+wellness1$TrainingReadiness <- sub('\\%',"",wellness1$TrainingReadiness)
+wellness1$TrainingReadiness <- as.numeric(wellness1$TrainingReadiness)
+
+missing_data <- wellness1 %>% summarise_all(funs(sum(is.na(.))/n()))
+missing_data <- gather(missing_data, key = "variables", value = "percent_missing")
+ggplot(missing_data, aes(x = reorder(variables, percent_missing), y = percent_missing)) +
+  geom_bar(stat = "identity", fill = "red", aes(color = I('white')), size = 0.3)+
+  xlab('variables')+
+  coord_flip()+ 
+  theme_bw()
+
+##clean up rpe
+rpe2 = rpe1
+
+#from https://stackoverflow.com/questions/45298997/merge-two-rows-in-data-frame
+#df %>% 
+#group_by(Date, Origin) %>% 
+#  summarise_all(funs(trimws(paste(., collapse = ''))))
+
+#get a sum of duration, mean(RPE), and sum SessionLoad
+rpe2 = rpe2 %>% 
+  group_by(Date, PlayerID) %>%
+  summarise(Training = paste(Training, collapse=','), SessionType = paste(SessionType, collapse=', '),
+    Duration = sum(Duration),RPE = mean(RPE),SessionLoad=sum(SessionLoad)) 
+rpe2$SessionType = as.factor(rpe2$SessionType)
+str(rpe2)
+
+wellness1$PlayerID = as.factor(wellness1$PlayerID)
+rpe2$PlayerID = as.factor(rpe2$PlayerID)
+```
+
+As one can see, I chose to eliminate a majority of the RPE variables as they had large percentages of their data missing. Though it's somewhat unideal as the eliminated variables are some of the most objective pieces of data within the set, I found it cleaner and more workable to move on without them.
+
+In the following chunk of code, I performed some EDA.
+
+```{r}
+ggplot(wellness1, aes(x=Date, y=Fatigue, color=factor(PlayerID),label = factor(PlayerID))) +
+  geom_smooth(se=F)
+
+ggplot(rpe2, aes(x=Date, y=SessionLoad, color=factor(PlayerID))) +
+  geom_smooth(se=F)
+
+avgPlayer = wellness1
+avgPlayer = wellness1 %>%
+  group_by(PlayerID) %>%
+  summarise(avgPlayer$fatigue <- mean(Fatigue),avgPlayer$soreness <- mean(Soreness), avgPlayer$desire <- mean(Desire),
+            avgPlayer$irritability <- mean(Irritability), avgPlayer$sleepHours <- mean(SleepHours), 
+            avgPlayer$sleepQuality <- mean(SleepQuality), avgPlayer$monitored <- mean(MonitoringScore))
+colnames(avgPlayer) <- c("PlayerID","fatigue","soreness","desire","irritability","sleepHours","sleepQuality","monitored")
+avgPlayer$PlayerID <- as.factor(avgPlayer$PlayerID)
+
+plot_grid(
+  ggplot(avgPlayer, aes(PlayerID,fatigue,label=factor(PlayerID),color=factor(PlayerID),fill=factor(PlayerID)))+
+    geom_bar(stat="identity"),
+  ggplot(avgPlayer, aes(PlayerID,desire,label=factor(PlayerID),color=factor(PlayerID),fill=factor(PlayerID)))+
+    geom_bar(stat="identity"),
+  ggplot(avgPlayer, aes(PlayerID,sleepQuality,label=factor(PlayerID),color=factor(PlayerID),fill=factor(PlayerID)))+
+    geom_bar(stat="identity"),
+  ggplot(avgPlayer, aes(PlayerID,monitored,label=factor(PlayerID),color=factor(PlayerID),fill=factor(PlayerID)))+
+    geom_bar(stat="identity")
+)
+```
+
+The first graph illustrates the reported fatigue levels of the players over the course of the season, and shows distinctly some players who often reported either higher or lower fatigue ratings than their fellow players. The following chart illustrates the reported SessionLoad across the season, a.k.a. a quanitfied variable that describes the intensity of their training/gameplay. The final charts track each player's respective reported fatigue, desire, sleepQuality, and monitoredAVG (a collected average of each player's self-reported scores) averaged over the course of the season. One can see that the shapes of each self-reported variable are fairly similar compared to fatigue, suggesting a relationship between reported fatigue and other self-reported factors.
+
+Below are some initial linear models.
+
+```{r}
+well.lm1 = lm(Fatigue~.-MonitoringScore,data=wellness1)
+summary(well.lm1)
+
+well.lm2 = lm(TrainingReadiness~.-MonitoringScore,data=wellness1)
+summary(well.lm2)
+
+well2.lm1 = lm(Fatigue~.-MonitoringScore-Training-SessionType,data=wellness2)
+summary(well2.lm1)
+
+well2.lm2 = lm(Fatigue~.-MonitoringScore-Training-SessionType-Duration-RPE-WakeTime-Menstruation-TrainingReadiness,
+               data=wellness2)
+summary(well2.lm2)
+
+```
+
+I land on a model that gives me an adjusted r-squared value of 0.6401 that I am fairly happy with. Here, one can observe that certain players are more prone to reporting higher levels of fatigue than others, with Player 1 as the anchor that is observed into the coefficient seeming to report the lowest fatigue score (signifying a higher level of fatigue) than the others, aside from Player 16. However, as it is my goal to specifically identify factors that contribute to fatigue, I decided to move on and utilize the tree model.
+
+```{r}
+wellness5 = wellness2
+wellness5=wellness5[-c(11,18,19)]
+
+wellness5 = wellness5[-c(3)]
+well5.rpart1 = rpart(notFatigued~.,data=wellness5)
+fancyRpartPlot(well5.rpart1)
+summary(well5.rpart1)
+
+wellness6=wellness5[-c(2)]
+well6.rpart1 = rpart(notFatigued~., data=wellness6)
+fancyRpartPlot(well6.rpart1)
+summary(well6.rpart1)
+```
+
+With the RPart tree model, I'm able to identify individual variables' influence over the model. With the inclusion of Player IDs, the highest contributing factors seem to be soreness and sleep quality, logically suggesting that players who are less sore/have better sleep report lower levels of fatigue. However, when PlayerIDs are removed from the equation, desire becomes more influential, with sleep quality and soreness falling behind, suggesting that desire is definitely linked to each individual player and their personal attitudes towards their performance in the game. All in all, my suggestion to the Canadian Women's Rugby Sevens team would be to make concentrated efforts to alliviate any physical fatigue/sleep issues in conjunction with their training, and to look into programs that may increase morale among players.
